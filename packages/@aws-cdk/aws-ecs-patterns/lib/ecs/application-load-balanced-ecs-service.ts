@@ -1,4 +1,4 @@
-import { Ec2Service, Ec2TaskDefinition, PlacementConstraint, PlacementStrategy } from '@aws-cdk/aws-ecs';
+import { CapacityProviderStrategy, Ec2Service, Ec2TaskDefinition, PlacementConstraint, PlacementStrategy } from '@aws-cdk/aws-ecs';
 import { FeatureFlags } from '@aws-cdk/core';
 import * as cxapi from '@aws-cdk/cx-api';
 import { Construct } from 'constructs';
@@ -80,6 +80,15 @@ export interface ApplicationLoadBalancedEc2ServiceProps extends ApplicationLoadB
    * @default - No strategies.
   */
   readonly placementStrategies?: PlacementStrategy[];
+
+
+  /**
+   * A list of Capacity Provider strategies used to place a service.
+   *
+   * @default - undefined
+   *
+   */
+  capacityProviderStrategies?: CapacityProviderStrategy[];
 }
 
 /**

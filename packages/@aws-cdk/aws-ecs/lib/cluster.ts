@@ -55,6 +55,13 @@ export interface ClusterProps {
   readonly capacityProviders?: string[];
 
   /**
+   * The cluster default capacity provider
+   *
+   * @default - undefined
+   */
+  readonly defaultCapacityProvider?: string;
+
+  /**
    * Whether to enable Fargate Capacity Providers
    *
    * @default false
@@ -241,7 +248,8 @@ export class Cluster extends Resource implements ICluster {
     // since it's harmless, but we'd prefer not to add unexpected new
     // resources to the stack which could surprise users working with
     // brown-field CDK apps and stacks.
-    Aspects.of(this).add(new MaybeCreateCapacityProviderAssociations(this, id, this._capacityProviderNames));
+    Aspects.of(this).add(new MaybeCreateCapacityProviderAssociations(
+      this, id, this._capacityProviderNames, props.defaultCapacityProvider));
   }
 
   /**
@@ -255,7 +263,7 @@ export class Cluster extends Resource implements ICluster {
     }
   }
 
-  private renderExecuteCommandConfiguration() : CfnCluster.ClusterConfigurationProperty {
+  private renderExecuteCommandConfiguration(): CfnCluster.ClusterConfigurationProperty {
     return {
       executeCommandConfiguration: {
         kmsKeyId: this._executeCommandConfiguration?.kmsKey?.keyArn,
@@ -355,7 +363,7 @@ export class Cluster extends Resource implements ICluster {
    *
    * @param provider the capacity provider to add to this cluster.
    */
-  public addAsgCapacityProvider(provider: AsgCapacityProvider, options: AddAutoScalingGroupCapacityOptions= {}) {
+  public addAsgCapacityProvider(provider: AsgCapacityProvider, options: AddAutoScalingGroupCapacityOptions = {}) {
     // Don't add the same capacity provider more than once.
     if (this._capacityProviderNames.includes(provider.capacityProviderName)) {
       return;
@@ -1158,21 +1166,29 @@ export class AsgCapacityProvider extends Construct {
 class MaybeCreateCapacityProviderAssociations implements IAspect {
   private scope: Construct;
   private id: string;
+  private defaultCapacityProvider?: string;
   private capacityProviders: string[]
   private resource?: CfnClusterCapacityProviderAssociations
 
-  constructor(scope: Construct, id: string, capacityProviders: string[] ) {
+  constructor(scope: Construct, id: string, capacityProviders: string[], defaultCapacityProvider?: string) {
     this.scope = scope;
     this.id = id;
+    this.defaultCapacityProvider = defaultCapacityProvider;
     this.capacityProviders = capacityProviders;
   }
 
   public visit(node: IConstruct): void {
     if (node instanceof Cluster) {
       if (this.capacityProviders.length > 0 && !this.resource) {
+        let defaultCapacityProviderStrategy = [];
+        if (this.defaultCapacityProvider) {
+          defaultCapacityProviderStrategy = [{
+            capacityProvider: this.defaultCapacityProvider
+          }]
+        }
         const resource = new CfnClusterCapacityProviderAssociations(this.scope, this.id, {
           cluster: node.clusterName,
-          defaultCapacityProviderStrategy: [],
+          defaultCapacityProviderStrategy: defaultCapacityProviderStrategy,
           capacityProviders: Lazy.list({ produce: () => this.capacityProviders }),
         });
         this.resource = resource;

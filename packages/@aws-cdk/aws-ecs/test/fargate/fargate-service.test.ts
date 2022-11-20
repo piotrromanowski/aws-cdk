@@ -10,6 +10,9 @@ import * as secretsmanager from '@aws-cdk/aws-secretsmanager';
 import * as cloudmap from '@aws-cdk/aws-servicediscovery';
 import { testDeprecated } from '@aws-cdk/cdk-build-tools';
 import * as cdk from '@aws-cdk/core';
+import { App } from '@aws-cdk/core';
+import * as cxapi from '@aws-cdk/cx-api';
+import { ECS_ARN_FORMAT_INCLUDES_CLUSTER_NAME } from '@aws-cdk/cx-api';
 import * as ecs from '../../lib';
 import { DeploymentControllerType, LaunchType, PropagatedTagSource } from '../../lib/base/base-service';
 import { addDefaultCapacityProvider } from '../util';
@@ -585,13 +588,16 @@ describe('fargate service', () => {
         },
       });
 
+      // Errors on validation, not on construction.
+      new ecs.FargateService(stack, 'FargateService', {
+        cluster,
+        taskDefinition,
+        platformVersion: ecs.FargatePlatformVersion.VERSION1_3,
+      });
+
       // THEN
       expect(() => {
-        new ecs.FargateService(stack, 'FargateService', {
-          cluster,
-          taskDefinition,
-          platformVersion: ecs.FargatePlatformVersion.VERSION1_3,
-        });
+        Template.fromStack(stack);
       }).toThrow(new RegExp(`uses at least one container that references a secret JSON field.+platform version ${ecs.FargatePlatformVersion.VERSION1_4} or later`));
     });
 
@@ -650,6 +656,33 @@ describe('fargate service', () => {
           },
         },
       });
+    });
+
+
+    test('add warning to annotations if circuitBreaker is specified with a non-ECS DeploymentControllerType', () => {
+      // GIVEN
+      const stack = new cdk.Stack();
+      const vpc = new ec2.Vpc(stack, 'MyVpc', {});
+      const cluster = new ecs.Cluster(stack, 'EcsCluster', { vpc });
+      const taskDefinition = new ecs.FargateTaskDefinition(stack, 'FargateTaskDef');
+
+      taskDefinition.addContainer('web', {
+        image: ecs.ContainerImage.fromRegistry('amazon/amazon-ecs-sample'),
+      });
+
+      const service = new ecs.FargateService(stack, 'FargateService', {
+        cluster,
+        taskDefinition,
+        deploymentController: {
+          type: DeploymentControllerType.EXTERNAL,
+        },
+        circuitBreaker: { rollback: true },
+      });
+
+      // THEN
+      expect(service.node.metadata[0].data).toEqual('taskDefinition and launchType are blanked out when using external deployment controller.');
+      expect(service.node.metadata[1].data).toEqual('Deployment circuit breaker requires the ECS deployment controller.');
+
     });
 
     test('errors when no container specified on task definition', () => {
@@ -739,14 +772,50 @@ describe('fargate service', () => {
       new ecs.FargateService(stack, 'FargateService', {
         cluster,
         taskDefinition,
-        minHealthyPercent: 0,
+        assignPublicIp: true,
       });
 
       // THEN
       Template.fromStack(stack).hasResourceProperties('AWS::ECS::Service', {
-        DeploymentConfiguration: {
-          MinimumHealthyPercent: 0,
+        NetworkConfiguration: {
+          AwsvpcConfiguration: {
+            AssignPublicIp: 'ENABLED',
+          },
         },
+      });
+    });
+
+    test('sets task definition to family when CODE_DEPLOY deployment controller is specified', () => {
+      // GIVEN
+      const stack = new cdk.Stack();
+      const vpc = new ec2.Vpc(stack, 'MyVpc', {});
+      const cluster = new ecs.Cluster(stack, 'EcsCluster', { vpc });
+      const taskDefinition = new ecs.FargateTaskDefinition(stack, 'FargateTaskDef');
+
+      taskDefinition.addContainer('web', {
+        image: ecs.ContainerImage.fromRegistry('amazon/amazon-ecs-sample'),
+      });
+
+      new ecs.FargateService(stack, 'FargateService', {
+        cluster,
+        taskDefinition,
+        deploymentController: {
+          type: ecs.DeploymentControllerType.CODE_DEPLOY,
+        },
+      });
+
+      // THEN
+      Template.fromStack(stack).hasResource('AWS::ECS::Service', {
+        Properties: {
+          TaskDefinition: 'FargateTaskDef',
+          DeploymentController: {
+            Type: 'CODE_DEPLOY',
+          },
+        },
+        DependsOn: [
+          'FargateTaskDefC6FB60B4',
+          'FargateTaskDefTaskRole0B257552',
+        ],
       });
     });
 
@@ -1260,7 +1329,7 @@ describe('fargate service', () => {
               containerPort: 8001,
             })],
           });
-        }).toThrow(/No container named 'SideContainer'. Did you call "addContainer()"?/);
+        }).toThrow(/No container named 'SideContainer'. Did you call "addContainer\(\)"?/);
       });
     });
 
@@ -2083,7 +2152,102 @@ describe('fargate service', () => {
   });
 
   describe('When import a Fargate Service', () => {
-    test('with serviceArn', () => {
+    test('fromFargateServiceArn old format', () => {
+      // GIVEN
+      const stack = new cdk.Stack();
+
+      // WHEN
+      const service = ecs.FargateService.fromFargateServiceArn(stack, 'EcsService', 'arn:aws:ecs:us-west-2:123456789012:service/my-http-service');
+
+      // THEN
+      expect(service.serviceArn).toEqual('arn:aws:ecs:us-west-2:123456789012:service/my-http-service');
+      expect(service.serviceName).toEqual('my-http-service');
+    });
+
+    test('fromFargateServiceArn new format', () => {
+      // GIVEN
+      const stack = new cdk.Stack();
+
+      // WHEN
+      const service = ecs.FargateService.fromFargateServiceArn(stack, 'EcsService', 'arn:aws:ecs:us-west-2:123456789012:service/my-cluster-name/my-http-service');
+
+      // THEN
+      expect(service.serviceArn).toEqual('arn:aws:ecs:us-west-2:123456789012:service/my-cluster-name/my-http-service');
+      expect(service.serviceName).toEqual('my-http-service');
+    });
+
+    describe('fromFargateServiceArn tokenized ARN', () => {
+      test('when @aws-cdk/aws-ecs:arnFormatIncludesClusterName is disabled, use old ARN format', () => {
+        // GIVEN
+        const stack = new cdk.Stack();
+
+        // WHEN
+        const service = ecs.FargateService.fromFargateServiceArn(stack, 'EcsService', new cdk.CfnParameter(stack, 'ARN').valueAsString);
+
+        // THEN
+        expect(stack.resolve(service.serviceArn)).toEqual({ Ref: 'ARN' });
+        expect(stack.resolve(service.serviceName)).toEqual({
+          'Fn::Select': [
+            1,
+            {
+              'Fn::Split': [
+                '/',
+                {
+                  'Fn::Select': [
+                    5,
+                    {
+                      'Fn::Split': [
+                        ':',
+                        { Ref: 'ARN' },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        });
+      });
+
+      test('when @aws-cdk/aws-ecs:arnFormatIncludesClusterName is enabled, use new ARN format', () => {
+        // GIVEN
+        const app = new App({
+          context: {
+            [ECS_ARN_FORMAT_INCLUDES_CLUSTER_NAME]: true,
+          },
+        });
+        const stack = new cdk.Stack(app);
+
+        // WHEN
+        const service = ecs.FargateService.fromFargateServiceArn(stack, 'EcsService', new cdk.CfnParameter(stack, 'ARN').valueAsString);
+
+        // THEN
+        expect(stack.resolve(service.serviceArn)).toEqual({ Ref: 'ARN' });
+        expect(stack.resolve(service.serviceName)).toEqual({
+          'Fn::Select': [
+            2,
+            {
+              'Fn::Split': [
+                '/',
+                {
+                  'Fn::Select': [
+                    5,
+                    {
+                      'Fn::Split': [
+                        ':',
+                        { Ref: 'ARN' },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        });
+      });
+    });
+
+    test('with serviceArn old format', () => {
       // GIVEN
       const stack = new cdk.Stack();
       const cluster = new ecs.Cluster(stack, 'EcsCluster');
@@ -2103,21 +2267,190 @@ describe('fargate service', () => {
 
     });
 
-    test('with serviceName', () => {
+    test('with serviceArn new format', () => {
       // GIVEN
       const stack = new cdk.Stack();
-      const pseudo = new cdk.ScopedAws(stack);
       const cluster = new ecs.Cluster(stack, 'EcsCluster');
 
       // WHEN
       const service = ecs.FargateService.fromFargateServiceAttributes(stack, 'EcsService', {
-        serviceName: 'my-http-service',
+        serviceArn: 'arn:aws:ecs:us-west-2:123456789012:service/my-cluster-name/my-http-service',
         cluster,
       });
 
       // THEN
-      expect(stack.resolve(service.serviceArn)).toEqual(stack.resolve(`arn:${pseudo.partition}:ecs:${pseudo.region}:${pseudo.accountId}:service/my-http-service`));
+      expect(service.serviceArn).toEqual('arn:aws:ecs:us-west-2:123456789012:service/my-cluster-name/my-http-service');
       expect(service.serviceName).toEqual('my-http-service');
+
+      expect(service.env.account).toEqual('123456789012');
+      expect(service.env.region).toEqual('us-west-2');
+    });
+
+    describe('with serviceArn tokenized ARN', () => {
+      test('when @aws-cdk/aws-ecs:arnFormatIncludesClusterName is disabled, use old ARN format', () => {
+        // GIVEN
+        const stack = new cdk.Stack();
+        const cluster = new ecs.Cluster(stack, 'EcsCluster');
+
+        // WHEN
+        const service = ecs.FargateService.fromFargateServiceAttributes(stack, 'EcsService', {
+          serviceArn: new cdk.CfnParameter(stack, 'ARN').valueAsString,
+          cluster,
+        });
+
+        // THEN
+        expect(stack.resolve(service.serviceArn)).toEqual({ Ref: 'ARN' });
+        expect(stack.resolve(service.serviceName)).toEqual({
+          'Fn::Select': [
+            1,
+            {
+              'Fn::Split': [
+                '/',
+                {
+                  'Fn::Select': [
+                    5,
+                    {
+                      'Fn::Split': [
+                        ':',
+                        { Ref: 'ARN' },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        });
+
+        expect(stack.resolve(service.env.account)).toEqual({
+          'Fn::Select': [
+            4,
+            {
+              'Fn::Split': [
+                ':',
+                { Ref: 'ARN' },
+              ],
+            },
+          ],
+        });
+        expect(stack.resolve(service.env.region)).toEqual({
+          'Fn::Select': [
+            3,
+            {
+              'Fn::Split': [
+                ':',
+                { Ref: 'ARN' },
+              ],
+            },
+          ],
+        });
+      });
+
+      test('when @aws-cdk/aws-ecs:arnFormatIncludesClusterName is enabled, use new ARN format', () => {
+        // GIVEN
+        const app = new App({
+          context: {
+            [ECS_ARN_FORMAT_INCLUDES_CLUSTER_NAME]: true,
+          },
+        });
+        const stack = new cdk.Stack(app);
+        const cluster = new ecs.Cluster(stack, 'EcsCluster');
+
+        // WHEN
+        const service = ecs.FargateService.fromFargateServiceAttributes(stack, 'EcsService', {
+          serviceArn: new cdk.CfnParameter(stack, 'ARN').valueAsString,
+          cluster,
+        });
+
+        // THEN
+        expect(stack.resolve(service.serviceArn)).toEqual({ Ref: 'ARN' });
+        expect(stack.resolve(service.serviceName)).toEqual({
+          'Fn::Select': [
+            2,
+            {
+              'Fn::Split': [
+                '/',
+                {
+                  'Fn::Select': [
+                    5,
+                    {
+                      'Fn::Split': [
+                        ':',
+                        { Ref: 'ARN' },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        });
+
+        expect(stack.resolve(service.env.account)).toEqual({
+          'Fn::Select': [
+            4,
+            {
+              'Fn::Split': [
+                ':',
+                { Ref: 'ARN' },
+              ],
+            },
+          ],
+        });
+        expect(stack.resolve(service.env.region)).toEqual({
+          'Fn::Select': [
+            3,
+            {
+              'Fn::Split': [
+                ':',
+                { Ref: 'ARN' },
+              ],
+            },
+          ],
+        });
+      });
+    });
+
+    describe('with serviceName', () => {
+      test('when @aws-cdk/aws-ecs:arnFormatIncludesClusterName is disabled, use old ARN format', () => {
+        // GIVEN
+        const stack = new cdk.Stack();
+        const pseudo = new cdk.ScopedAws(stack);
+        const cluster = new ecs.Cluster(stack, 'EcsCluster');
+
+        // WHEN
+        const service = ecs.FargateService.fromFargateServiceAttributes(stack, 'EcsService', {
+          serviceName: 'my-http-service',
+          cluster,
+        });
+
+        // THEN
+        expect(stack.resolve(service.serviceArn)).toEqual(stack.resolve(`arn:${pseudo.partition}:ecs:${pseudo.region}:${pseudo.accountId}:service/my-http-service`));
+        expect(service.serviceName).toEqual('my-http-service');
+      });
+
+      test('when @aws-cdk/aws-ecs:arnFormatIncludesClusterName is enabled, use new ARN format', () => {
+        // GIVEN
+        const app = new App({
+          context: {
+            [ECS_ARN_FORMAT_INCLUDES_CLUSTER_NAME]: true,
+          },
+        });
+
+        const stack = new cdk.Stack(app);
+        const pseudo = new cdk.ScopedAws(stack);
+        const cluster = new ecs.Cluster(stack, 'EcsCluster');
+
+        // WHEN
+        const service = ecs.FargateService.fromFargateServiceAttributes(stack, 'EcsService', {
+          serviceName: 'my-http-service',
+          cluster,
+        });
+
+        // THEN
+        expect(stack.resolve(service.serviceArn)).toEqual(stack.resolve(`arn:${pseudo.partition}:ecs:${pseudo.region}:${pseudo.accountId}:service/${cluster.clusterName}/my-http-service`));
+        expect(service.serviceName).toEqual('my-http-service');
+      });
     });
 
     test('with circuit breaker', () => {
@@ -2149,6 +2482,39 @@ describe('fargate service', () => {
         },
         DeploymentController: {
           Type: ecs.DeploymentControllerType.ECS,
+        },
+      });
+    });
+
+    test('with circuit breaker and deployment controller feature flag enabled', () => {
+      // GIVEN
+      const disableCircuitBreakerEcsDeploymentControllerFeatureFlag =
+          { [cxapi.ECS_DISABLE_EXPLICIT_DEPLOYMENT_CONTROLLER_FOR_CIRCUIT_BREAKER]: true };
+      const app = new App({ context: disableCircuitBreakerEcsDeploymentControllerFeatureFlag });
+      const stack = new cdk.Stack(app);
+      const cluster = new ecs.Cluster(stack, 'EcsCluster');
+      const taskDefinition = new ecs.FargateTaskDefinition(stack, 'FargateTaskDef');
+
+      taskDefinition.addContainer('Container', {
+        image: ecs.ContainerImage.fromRegistry('hello'),
+      });
+
+      // WHEN
+      new ecs.FargateService(stack, 'EcsService', {
+        cluster,
+        taskDefinition,
+        circuitBreaker: { rollback: true },
+      });
+
+      // THEN
+      Template.fromStack(stack).hasResourceProperties('AWS::ECS::Service', {
+        DeploymentConfiguration: {
+          MaximumPercent: 200,
+          MinimumHealthyPercent: 50,
+          DeploymentCircuitBreaker: {
+            Enable: true,
+            Rollback: true,
+          },
         },
       });
     });

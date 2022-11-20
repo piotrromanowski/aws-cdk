@@ -692,6 +692,26 @@ export interface CommonProjectProps {
    * @default - no explicit limit is set
    */
   readonly concurrentBuildLimit?: number
+
+  /**
+   * Add the permissions necessary for debugging builds with SSM Session Manager
+   *
+   * If the following prerequisites have been met:
+   *
+   * - The necessary permissions have been added by setting this flag to true.
+   * - The build image has the SSM agent installed (true for default CodeBuild images).
+   * - The build is started with [debugSessionEnabled](https://docs.aws.amazon.com/codebuild/latest/APIReference/API_StartBuild.html#CodeBuild-StartBuild-request-debugSessionEnabled) set to true.
+   *
+   * Then the build container can be paused and inspected using Session Manager
+   * by invoking the `codebuild-breakpoint` command somewhere during the build.
+   *
+   * `codebuild-breakpoint` commands will be ignored if the build is not started
+   * with `debugSessionEnabled=true`.
+   *
+   * @see https://docs.aws.amazon.com/codebuild/latest/userguide/session-manager.html
+   * @default false
+   */
+  readonly ssmSessionPermissions?: boolean;
 }
 
 export interface ProjectProps extends CommonProjectProps {
@@ -1126,6 +1146,27 @@ export class Project extends ProjectBase {
           'codebuild:BatchPutCodeCoverages',
         ],
         resources: [renderReportGroupArn(this, `${this.projectName}-*`)],
+      }));
+    }
+
+    // https://docs.aws.amazon.com/codebuild/latest/userguide/session-manager.html
+    if (props.ssmSessionPermissions) {
+      this.addToRolePolicy(new iam.PolicyStatement({
+        actions: [
+          // For the SSM channel
+          'ssmmessages:CreateControlChannel',
+          'ssmmessages:CreateDataChannel',
+          'ssmmessages:OpenControlChannel',
+          'ssmmessages:OpenDataChannel',
+          // In case the SSM session is set up to log commands to CloudWatch
+          'logs:DescribeLogGroups',
+          'logs:CreateLogStream',
+          'logs:PutLogEvents',
+          // In case the SSM session is set up to log commands to S3.
+          's3:GetEncryptionConfiguration',
+          's3:PutObject',
+        ],
+        resources: ['*'],
       }));
     }
 
@@ -1690,11 +1731,15 @@ export class LinuxBuildImage implements IBuildImage {
   public static readonly STANDARD_4_0 = LinuxBuildImage.codeBuildImage('aws/codebuild/standard:4.0');
   /** The `aws/codebuild/standard:5.0` build image. */
   public static readonly STANDARD_5_0 = LinuxBuildImage.codeBuildImage('aws/codebuild/standard:5.0');
+  /** The `aws/codebuild/standard:6.0` build image. */
+  public static readonly STANDARD_6_0 = LinuxBuildImage.codeBuildImage('aws/codebuild/standard:6.0');
 
   public static readonly AMAZON_LINUX_2 = LinuxBuildImage.codeBuildImage('aws/codebuild/amazonlinux2-x86_64-standard:1.0');
   public static readonly AMAZON_LINUX_2_2 = LinuxBuildImage.codeBuildImage('aws/codebuild/amazonlinux2-x86_64-standard:2.0');
   /** The Amazon Linux 2 x86_64 standard image, version `3.0`. */
   public static readonly AMAZON_LINUX_2_3 = LinuxBuildImage.codeBuildImage('aws/codebuild/amazonlinux2-x86_64-standard:3.0');
+  /** The Amazon Linux 2 x86_64 standard image, version `4.0`. */
+  public static readonly AMAZON_LINUX_2_4 = LinuxBuildImage.codeBuildImage('aws/codebuild/amazonlinux2-x86_64-standard:4.0');
 
   /** @deprecated Use LinuxArmBuildImage.AMAZON_LINUX_2_STANDARD_1_0 instead. */
   public static readonly AMAZON_LINUX_2_ARM = LinuxArmBuildImage.AMAZON_LINUX_2_STANDARD_1_0;
@@ -1917,6 +1962,16 @@ export class WindowsBuildImage implements IBuildImage {
    */
   public static readonly WIN_SERVER_CORE_2019_BASE: IBuildImage = new WindowsBuildImage({
     imageId: 'aws/codebuild/windows-base:2019-1.0',
+    imagePullPrincipalType: ImagePullPrincipalType.CODEBUILD,
+    imageType: WindowsImageType.SERVER_2019,
+  });
+
+  /**
+   * The standard CodeBuild image `aws/codebuild/windows-base:2019-2.0`, which is
+   * based off Windows Server Core 2019.
+   */
+  public static readonly WIN_SERVER_CORE_2019_BASE_2_0: IBuildImage = new WindowsBuildImage({
+    imageId: 'aws/codebuild/windows-base:2019-2.0',
     imagePullPrincipalType: ImagePullPrincipalType.CODEBUILD,
     imageType: WindowsImageType.SERVER_2019,
   });

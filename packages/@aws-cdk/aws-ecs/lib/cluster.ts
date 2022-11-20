@@ -71,7 +71,7 @@ export interface ClusterProps {
   /**
    * If true CloudWatch Container Insights will be enabled for the cluster
    *
-   * @default - Container Insights will be disabled for this cluser.
+   * @default - Container Insights will be disabled for this cluster.
    */
   readonly containerInsights?: boolean;
 
@@ -346,7 +346,7 @@ export class Cluster extends Resource implements ICluster {
     const autoScalingGroup = new autoscaling.AutoScalingGroup(this, id, {
       vpc: this.vpc,
       machineImage,
-      updateType: options.updateType || autoscaling.UpdateType.REPLACING_UPDATE,
+      updateType: !!options.updatePolicy ? undefined : options.updateType || autoscaling.UpdateType.REPLACING_UPDATE,
       ...options,
     });
 
